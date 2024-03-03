@@ -173,9 +173,7 @@ func createGCMServer() (v1.API, error) {
 		option.WithScopes("https://www.googleapis.com/auth/monitoring.read"),
 		option.WithCredentialsFile(*credentialsFile),
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	transport, err := apihttp.NewTransport(ctx, http.DefaultTransport, opts...)
+	transport, err := apihttp.NewTransport(context.Background(), http.DefaultTransport, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("error creating proxy HTTP transport: %s", err)
 	}
