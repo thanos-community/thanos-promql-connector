@@ -1,0 +1,59 @@
+version: "2"
+
+services:
+  prom-1:
+    image: quay.io/prometheus/prometheus
+    command:
+    - --config.file=/etc/prometheus/prometheus.yml
+    volumes:
+    - ./prometheus-1.yml:/etc/prometheus/prometheus.yml
+  sidecar-1:
+    image: quay.io/thanos/thanos:v0.34.1
+    command:
+    - sidecar
+    - --prometheus.url=http://prom-1:9090
+  querier-1:
+    image: quay.io/thanos/thanos:v0.34.1
+    command:
+    - query
+    - --endpoint=sidecar-1:10901
+
+  prom-2:
+    image: quay.io/prometheus/prometheus
+    command:
+    - --config.file=/etc/prometheus/prometheus.yml
+    volumes:
+    - ./prometheus-2.yml:/etc/prometheus/prometheus.yml
+
+  sidecar-2:
+    image: quay.io/thanos/thanos:v0.34.1
+    command:
+    - sidecar
+    - --prometheus.url=http://prom-2:9090
+  querier-2:
+    image: quay.io/thanos/thanos:v0.34.1
+    command:
+    - query
+    - --endpoint=sidecar-2:10901
+
+  querier-3:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command:
+    - --query.target-url=https://monitoring.googleapis.com/v1/projects/<PROJECT_ID>/location/global/prometheus
+    - --query.credentials-file=/key.json
+    volumes:
+    - <SERVICE_ACCOUNT_CREDENTIAL_FILE_PATH>:/key.json
+
+  querier:
+    image: quay.io/thanos/thanos:v0.34.1
+    command:
+    - query
+    - --endpoint-strict=querier-1:10901
+    - --endpoint-strict=querier-2:10901
+    - --endpoint-strict=querier-3:8081
+    - --query.mode=distributed
+    - --query.promql-engine=thanos
+    ports:
+    - "10902:10902"
