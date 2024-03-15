@@ -21,7 +21,9 @@ import (
 	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/model/labels"
 	"github.com/thanos-io/thanos/pkg/api/query/querypb"
+	"github.com/thanos-io/thanos/pkg/component"
 	"github.com/thanos-io/thanos/pkg/info/infopb"
 	"github.com/thanos-io/thanos/pkg/store/labelpb"
 	"github.com/thanos-io/thanos/pkg/store/storepb/prompb"
@@ -32,23 +34,21 @@ import (
 )
 
 var (
-	credentialsFile = flag.String("query.credentials-file", "",
-		"JSON-encoded credentials (service account or refresh token). Can be left empty if default credentials have sufficient permission.")
-	targetURL = flag.String("query.target-url", "",
-		"The URL to forward query requests to.")
-	connectorAddress = flag.String("connector-address", ":8081",
+	configFileAddress = flag.String("query.config-file", "", "Thanos-promql-connector configuration file path.")
+	connectorAddress  = flag.String("connector-address", ":8081",
 		"Address on which to expose the query grpc server.")
 	metricsAddress = flag.String("metrics-address", ":9090",
 		"Address on which to expose metrics")
-	queryBackendClient v1.API
 )
 
-type queryServer struct{}
+type queryServer struct {
+	queryBackendClient v1.API
+}
 
-func (*queryServer) Query(req *querypb.QueryRequest, srv querypb.Query_QueryServer) error {
+func (qs *queryServer) Query(req *querypb.QueryRequest, srv querypb.Query_QueryServer) error {
 	ts := time.Unix(req.TimeSeconds, 0)
 	timeout := time.Duration(req.TimeoutSeconds) * time.Second
-	values, warnings, err := queryBackendClient.Query(srv.Context(), req.Query, ts, v1.WithTimeout(timeout))
+	values, warnings, err := qs.queryBackendClient.Query(srv.Context(), req.Query, ts, v1.WithTimeout(timeout))
 	if err != nil {
 		return status.Error(codes.Aborted, err.Error())
 	}
@@ -79,13 +79,13 @@ func (*queryServer) Query(req *querypb.QueryRequest, srv querypb.Query_QueryServ
 	return nil
 }
 
-func (*queryServer) QueryRange(req *querypb.QueryRangeRequest, srv querypb.Query_QueryRangeServer) error {
+func (qs *queryServer) QueryRange(req *querypb.QueryRangeRequest, srv querypb.Query_QueryRangeServer) error {
 	timeout := time.Duration(req.TimeoutSeconds) * time.Second
 	interval := v1.Range{
 		Start: time.Unix(req.StartTimeSeconds, 0),
 		End:   time.Unix(req.EndTimeSeconds, 0),
 		Step:  time.Duration(req.IntervalSeconds) * time.Second}
-	values, warnings, err := queryBackendClient.QueryRange(srv.Context(), req.Query, interval, v1.WithTimeout(timeout))
+	values, warnings, err := qs.queryBackendClient.QueryRange(srv.Context(), req.Query, interval, v1.WithTimeout(timeout))
 	if err != nil {
 		return status.Error(codes.Aborted, err.Error())
 	}
@@ -148,11 +148,14 @@ func zLabelsFromMetric(metric model.Metric) []labelpb.ZLabel {
 	return zlabels
 }
 
-type infoServer struct{}
+type infoServer struct {
+	queryBackend string
+}
 
-func (*infoServer) Info(ctx context.Context, in *infopb.InfoRequest) (*infopb.InfoResponse, error) {
+func (info *infoServer) Info(ctx context.Context, in *infopb.InfoRequest) (*infopb.InfoResponse, error) {
 	return &infopb.InfoResponse{
-		Query: &infopb.QueryAPIInfo{},
+		ComponentType: component.Query.String(),
+		LabelSets:     labelpb.ZLabelSetsFromPromLabels(labels.FromStrings("query-backend", info.queryBackend)),
 		Store: &infopb.StoreInfo{
 			MinTime:                      math.MinInt64,
 			MaxTime:                      math.MaxInt64,
@@ -164,21 +167,22 @@ func (*infoServer) Info(ctx context.Context, in *infopb.InfoRequest) (*infopb.In
 				},
 			},
 		},
+		Query: &infopb.QueryAPIInfo{},
 	}, nil
 }
 
-// createGCMServer creates a
-func createGCMServer() (v1.API, error) {
+// createQueryBackendClient creates a connection with the backend that the queries will be forwarded to.
+func createQueryBackendClient(queryConfig queryBackendConfig) (v1.API, error) {
 	opts := []option.ClientOption{
-		option.WithScopes("https://www.googleapis.com/auth/monitoring.read"),
-		option.WithCredentialsFile(*credentialsFile),
+		option.WithScopes(queryConfig.Auth.Scopes...),
+		option.WithCredentialsFile(queryConfig.Auth.CredentialsFile),
 	}
 	transport, err := apihttp.NewTransport(context.Background(), http.DefaultTransport, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("error creating proxy HTTP transport: %s", err)
 	}
 	client, err := api.NewClient(api.Config{
-		Address:      *targetURL,
+		Address:      queryConfig.QueryTargetURL,
 		RoundTripper: transport,
 	})
 	if err != nil {
@@ -193,12 +197,15 @@ func main() {
 	logger = log.With(logger, "ts", log.DefaultTimestampUTC)
 	logger = log.With(logger, "caller", log.DefaultCaller)
 
-	if *targetURL == "" {
-		level.Error(logger).Log("msg", "--query.target-url must be set")
+	var err error
+	// Configuration Loading.
+	queryConfig, err := loadQueryConfig(*configFileAddress)
+	if err != nil {
+		level.Error(logger).Log("err", err)
 		os.Exit(1)
 	}
-	var err error
-	queryBackendClient, err = createGCMServer()
+	// Query client setup.
+	queryBackendClient, err := createQueryBackendClient(*queryConfig)
 	if err != nil {
 		level.Error(logger).Log("msg", "Error creating client", "err", err)
 		os.Exit(1)
@@ -231,8 +238,8 @@ func main() {
 			panic(err)
 		}
 		server := grpc.NewServer()
-		querypb.RegisterQueryServer(server, &queryServer{})
-		infopb.RegisterInfoServer(server, &infoServer{})
+		querypb.RegisterQueryServer(server, &queryServer{queryBackendClient: queryBackendClient})
+		infopb.RegisterInfoServer(server, &infoServer{queryBackend: queryConfig.QueryTargetURL})
 		g.Add(func() error {
 			level.Info(logger).Log("msg", "Starting grpc server for query endpoint", "listen", *connectorAddress)
 			return server.Serve(listener)

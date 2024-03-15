@@ -41,10 +41,10 @@ services:
       context: ../..
       dockerfile: Dockerfile
     command:
-    - --query.target-url=https://monitoring.googleapis.com/v1/projects/<PROJECT_ID>/location/global/prometheus
-    - --query.credentials-file=/key.json
+    - --query.config-file=/config.yaml
     volumes:
-    - <SERVICE_ACCOUNT_CREDENTIAL_FILE_PATH>:/key.json
+    - ./key.json:/key.json
+    - ./config.yaml:/config.yaml
 
   querier:
     image: quay.io/thanos/thanos:v0.34.1
