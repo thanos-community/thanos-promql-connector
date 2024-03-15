@@ -1,0 +1,5 @@
+query_target_url: "https://monitoring.googleapis.com/v1/projects/<PROJECT_ID>/location/global/prometheus"
+auth: 
+  credentials_file: /key.json
+  scopes: 
+    - "https://www.googleapis.com/auth/monitoring.read"

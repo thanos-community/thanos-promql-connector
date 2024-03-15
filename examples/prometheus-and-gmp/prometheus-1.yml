@@ -2,7 +2,7 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
   external_labels:
-    cluster: us1
+    cluster: cluster-data-center-1
 
 scrape_configs:
   - job_name: 'prometheus'
