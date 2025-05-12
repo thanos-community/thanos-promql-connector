@@ -26,6 +26,7 @@ import (
 	"github.com/thanos-io/thanos/pkg/component"
 	"github.com/thanos-io/thanos/pkg/info/infopb"
 	"github.com/thanos-io/thanos/pkg/store/labelpb"
+	"github.com/thanos-io/thanos/pkg/store/storepb"
 	"github.com/thanos-io/thanos/pkg/store/storepb/prompb"
 	"google.golang.org/api/option"
 	apihttp "google.golang.org/api/transport/http"
@@ -43,6 +44,46 @@ var (
 
 type queryServer struct {
 	queryBackendClient v1.API
+}
+
+func (qs *queryServer) Series(request *storepb.SeriesRequest, server storepb.Store_SeriesServer) error {
+	return status.Error(codes.Unimplemented, "Series is currently not implemented")
+}
+
+func (qs *queryServer) LabelNames(ctx context.Context, request *storepb.LabelNamesRequest) (*storepb.LabelNamesResponse, error) {
+	matches := make([]string, 0, len(request.Matchers))
+	for _, matcher := range request.Matchers {
+		matches = append(matches, matcher.PromString())
+	}
+	req, warnings, err := qs.queryBackendClient.LabelNames(ctx, matches, time.Unix(request.Start, 0), time.Unix(request.End, 0))
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &storepb.LabelNamesResponse{
+		Names:    req,
+		Warnings: warnings,
+		Hints:    nil,
+	}, nil
+}
+
+func (qs *queryServer) LabelValues(ctx context.Context, request *storepb.LabelValuesRequest) (*storepb.LabelValuesResponse, error) {
+	matches := make([]string, 0, len(request.Matchers))
+	for _, matcher := range request.Matchers {
+		matches = append(matches, matcher.PromString())
+	}
+	req, warnings, err := qs.queryBackendClient.LabelValues(ctx, request.Label, matches, time.Unix(request.Start, 0), time.Unix(request.End, 0))
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	values := make([]string, 0, len(req))
+	for _, value := range req {
+		values = append(values, string(value))
+	}
+	return &storepb.LabelValuesResponse{
+		Values:   values,
+		Warnings: warnings,
+		Hints:    nil,
+	}, nil
 }
 
 func (qs *queryServer) Query(req *querypb.QueryRequest, srv querypb.Query_QueryServer) error {
@@ -238,6 +279,7 @@ func main() {
 			panic(err)
 		}
 		server := grpc.NewServer()
+		storepb.RegisterStoreServer(server, &queryServer{queryBackendClient: queryBackendClient})
 		querypb.RegisterQueryServer(server, &queryServer{queryBackendClient: queryBackendClient})
 		infopb.RegisterInfoServer(server, &infoServer{queryBackend: queryConfig.QueryTargetURL})
 		g.Add(func() error {
